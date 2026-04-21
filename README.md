@@ -1,51 +1,87 @@
-MyShell
-MyShell is a lightweight, simple shell implementation written in C that utilizes the linenoise library to provide a modern command-line experience with history and line editing capabilities. It follows the standard REPL (Read-Eval-Print Loop) cycle to process user inputs and execute commands.
+# MyShell
 
-Features
-Standard REPL Cycle: Continuously reads input, evaluates it, prints results, and loops back for the next command.
+MyShell is a lightweight custom shell implementation written in C. It utilizes the [linenoise](https://github.com/antirez/linenoise) library to provide a modern command-line experience with line editing and persistent history. The shell follows the standard **REPL** (Read-Eval-Print Loop) cycle to process user input and execute commands.
 
-Built-in Commands: Includes native support for essential commands:
+## Features
 
-cd: Change the current working directory.
+- **Built-in Commands** — Native support for essential shell commands:
+  - `cd` — Change the current working directory (supports `~` expansion).
+  - `pwd` — Print the current working directory.
+  - `history` — View the command history.
+  - `exit` — Terminate the shell session.
 
-pwd: Print the current working directory.
+- **External Command Execution** — Runs system programs by forking child processes and invoking `execvp()`.
 
-history: View the command history.
+- **I/O Redirection** — Supports standard redirection operators:
+  - `<` — Redirect input from a file.
+  - `>` — Redirect output to a file (truncate).
+  - `>>` — Redirect output to a file (append).
 
-exit: Terminate the shell session.
+- **Background Execution** — Append `&` to run a command asynchronously without blocking the shell.
 
-External Command Execution: Capable of running system programs by using fork() to create child processes and execvp() for execution.
+- **Signal Handling** — Intercepts `SIGINT` (Ctrl+C) to prevent the shell from terminating; child processes retain default signal behavior.
 
-Command History: Maintains a history of up to 1,024 commands, allowing you to navigate previous inputs using the arrow keys.
+- **Dynamic Prompt** — Displays the current working directory with `~` shortening for the home path (e.g., `🪰 ~/projects $`).
 
-Interactive Interface: Features a distinct 🪰  prompt and interactive line editing.
+- **Command History** — Maintains up to 1,024 entries, navigable with the arrow keys.
 
-Project Structure
-myShell.c: The core logic of the shell, including command parsing, the execution engine, and built-in implementations.
+## Usage Examples
 
-linenoise.c & linenoise.h: A self-contained line editing library used for the interactive prompt and history management.
+```bash
+# Run an external command
+🪰 ~ $ ls -la
 
-Makefile: A build script to automate the compilation of the project.
+# Redirect output to a file (truncate)
+🪰 ~ $ echo "hello" > output.txt
 
-.gitignore: Configured to ignore object files (.o) and the compiled binary.
+# Append output to a file
+🪰 ~ $ echo "world" >> output.txt
 
-Getting Started
-Prerequisites
-GCC: The GNU Compiler Collection.
+# Redirect input from a file
+🪰 ~ $ sort < input.txt
 
-Make: The build automation tool.
+# Combine input and output redirection
+🪰 ~ $ sort < input.txt > sorted.txt
 
-Compilation
-To build the project, simply run the make command in your terminal within the project directory:
+# Run a command in the background
+🪰 ~ $ sleep 10 &
 
-Bash
+# Change directory with tilde expansion
+🪰 ~ $ cd ~/Documents
+```
+
+## Project Structure
+
+| File | Description |
+|---|---|
+| `myShell.c` | Core shell logic: command parsing, execution engine, built-in implementations, and I/O redirection. |
+| `linenoise.c` / `linenoise.h` | Self-contained line editing library for the interactive prompt and history management. |
+| `Makefile` | Build script to automate compilation. |
+| `.gitignore` | Configured to ignore object files (`.o`) and the compiled binary. |
+
+## Getting Started
+
+### Prerequisites
+
+- **GCC** — The GNU Compiler Collection.
+- **Make** — The build automation tool.
+
+### Compilation
+
+Build the project by running the following command in the project directory:
+
+```bash
 make
-This command uses the provided Makefile to compile myShell.c and linenoise.c into a final executable named myShell.
+```
 
-Running the Shell
-Once compiled, you can start the shell with:
+This compiles `myShell.c` and `linenoise.c` into an executable named `myShell`.
 
-Bash
+### Running the Shell
+
+```bash
 ./myShell
-Credits
-This project uses the linenoise library by Salvatore Sanfilippo and Pieter Noordhuis for its interactive line editing features.
+```
+
+## Credits
+
+This project uses the [linenoise](https://github.com/antirez/linenoise) library by Salvatore Sanfilippo and Pieter Noordhuis for interactive line editing.

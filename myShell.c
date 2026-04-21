@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <errno.h>
@@ -78,54 +79,95 @@ int s_read(char *input, char **args, int max_args){
   args[i] = NULL; // Null-terminate the argument list for execvp
   return i;
 }
+/**
+ * @brief Applies I/O redirection for the current process.
+ *
+ * Opens the specified files and redirects stdin/stdout accordingly.
+ * Intended to be called from a child process before execvp().
+ *
+ * @param input_file  Path to a file for input redirection (NULL if none).
+ * @param output_file Path to a file for output redirection (NULL if none).
+ * @param append      If non-zero, output is appended instead of truncated.
+ */
+void apply_redirection(char *input_file, char *output_file, int append) {
+  // Redirect stdin from a file
+  if (input_file) {
+    int fd_in = open(input_file, O_RDONLY);
+    if (fd_in < 0) {
+      perror("myShell: input redirection");
+      exit(EXIT_FAILURE);
+    }
+    dup2(fd_in, STDIN_FILENO);
+    close(fd_in);
+  }
+
+  // Redirect stdout to a file (truncate or append)
+  if (output_file) {
+    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+    int fd_out = open(output_file, flags, 0644);
+    if (fd_out < 0) {
+      perror("myShell: output redirection");
+      exit(EXIT_FAILURE);
+    }
+    dup2(fd_out, STDOUT_FILENO);
+    close(fd_out);
+  }
+}
 
 /**
- * @brief Executes a command by forking a new process.
- * 
- * Supports both synchronous (foreground) and asynchronous (background) execution.
- * 
- * @param cmd The command to execute.
- * @param cmd_args The arguments for the command.
- * @param background Flag indicating if the process should run in the background.
- * @return int The exit status of the command or -1 on failure.
+ * @brief Executes a single command by forking a new process.
+ *
+ * Supports foreground/background execution and I/O redirection.
+ *
+ * @param cmd         The command to execute.
+ * @param cmd_args    The argument list (argv-style, NULL-terminated).
+ * @param background  If non-zero, the command runs asynchronously.
+ * @param input_file  Path for input redirection (NULL if none).
+ * @param output_file Path for output redirection (NULL if none).
+ * @param append      If non-zero, output is appended instead of truncated.
+ * @return int        The child's exit status, or -1 on failure.
  */
-int s_execute(char *cmd, char **cmd_args, int background) {
+int s_execute(char *cmd,
+              char **cmd_args,
+              int background,
+              char *input_file,
+              char *output_file,
+              int append) {
   int status = 0;
-  pid_t pid;
+  pid_t pid = fork();
 
-  pid = fork();
-  if (pid < 0){
+  if (pid < 0) {
     perror("myShell: fork");
     return -1;
   }
-  
-  if (pid == 0){
-    // Child Process: Reset signal handling and execute the command
+
+  if (pid == 0) {
+    // Child: restore default signal handling
     signal(SIGINT, SIG_DFL);
+    apply_redirection(input_file, output_file, append);
+
+    // Execute the command using the path-searching version of exec
     if (execvp(cmd, cmd_args) == -1) {
       fprintf(stderr, "myShell: %s: command not found\n", cmd);
     }
-    // Terminate child process immediately if execution fails
-    exit(EXIT_FAILURE); 
+    // Terminate child immediately if execution fails
+    exit(EXIT_FAILURE);
   } else {
-    // Parent Process
+    // Parent: wait or report background PID
     if (!background) {
-      // Synchronous execution: Wait for the child process to complete
-      if (waitpid(pid, &status, 0) != pid){
+      if (waitpid(pid, &status, 0) != pid) {
         perror("myShell: waitpid");
       }
     } else {
-      // Asynchronous execution: Do not wait for the child
       printf("[Process running in background with PID: %d]\n", pid);
     }
   }
 
   // Return the exit status if the child terminated normally
-  if (WIFEXITED(status)) {
-    return WEXITSTATUS(status);
-  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
   return -1;
 }
+
 
 /**
  * @brief Updates the global CWD variable with the current working directory.
@@ -248,6 +290,12 @@ void s_execute_builtin(char *cmd, char **args, size_t n_args) {
  * @brief Main execution loop of the shell.
  */
 int main(void) {
+  // Fix for "dumb" terminals: linenoise skips its UTF-8 editor when
+  // TERM is "dumb", which garbles our emoji prompt. Force a real one.
+  if (!getenv("TERM") || strcmp(getenv("TERM"), "dumb") == 0) {
+    setenv("TERM", "xterm-256color", 1);
+  }
+
   refresh_cwd();
   build_prompt();
 
@@ -276,22 +324,78 @@ int main(void) {
       continue;
     }
 
-    // Evaluation Step
+    // --- Evaluation Step ---
     char *cmd = args[0];
-    char **cmd_args = args;
-
-    // Detect background execution operator '&'
+    char *input_file  = NULL;
+    char *output_file = NULL;
+    int append     = 0;
     int background = 0;
-    if (args_read > 0 && strcmp(args[args_read-1], "&") == 0) {
-      background = 1;
-      args[args_read-1] = NULL; // Remove '&' from arguments before execution
+
+    /**
+     * Parse special operators from the argument list:
+     *   '<'  — input redirection
+     *   '>'  — output redirection (truncate)
+     *   '>>' — output redirection (append)
+     *   '&'  — background execution
+     *
+     * Each operator and its operand are nullified in-place so that
+     * the remaining args[] array is clean for execvp().
+     */
+    int syntax_error = 0;
+    for (int i = 1; i < args_read; i++) {
+      if (strcmp(args[i], "<") == 0) {
+        if (i + 1 < args_read) {
+          input_file = args[i + 1];
+          args[i] = NULL;
+          args[i + 1] = NULL;
+          i++; // Skip the filename operand
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '<'\n");
+          syntax_error = 1;
+          break;
+        }
+      } else if (strcmp(args[i], ">>") == 0) {
+        // Check '>>' before '>' to avoid partial match
+        if (i + 1 < args_read) {
+          output_file = args[i + 1];
+          append = 1;
+          args[i] = NULL;
+          args[i + 1] = NULL;
+          i++;
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '>>'\n");
+          syntax_error = 1;
+          break;
+        }
+      } else if (strcmp(args[i], ">") == 0) {
+        if (i + 1 < args_read) {
+          output_file = args[i + 1];
+          append = 0;
+          args[i] = NULL;
+          args[i + 1] = NULL;
+          i++;
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '>'\n");
+          syntax_error = 1;
+          break;
+        }
+      } else if (strcmp(args[i], "&") == 0) {
+        background = 1;
+        args[i] = NULL;
+      }
     }
- 
+
+    // Skip execution on syntax errors
+    if (syntax_error) {
+      linenoiseFree(line);
+      continue;
+    }
+
     // Route execution to either a built-in or an external command
-    if (is_builtin(cmd)){
-      s_execute_builtin(cmd, (cmd_args + 1), (size_t)(args_read - 1));
+    if (is_builtin(cmd)) {
+      s_execute_builtin(cmd, (args + 1), (size_t)(args_read - 1));
     } else {
-      s_execute(cmd, cmd_args, background);
+      s_execute(cmd, args, background, input_file, output_file, append);
     }
 
     // Post-execution cleanup and prompt refresh
