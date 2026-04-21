@@ -3,7 +3,8 @@
  * @brief A professional, lightweight custom shell implementation in C.
  * 
  * Features include dynamic prompt, command execution (foreground/background),
- * built-in commands (cd, pwd, exit, history), and SIGINT handling.
+ * built-in commands (cd, pwd, exit, history), piping, I/O redirection,
+ * and SIGINT handling.
  * 
  * To build: make ./myShell
  */
@@ -112,6 +113,61 @@ void apply_redirection(char *input_file, char *output_file, int append) {
     dup2(fd_out, STDOUT_FILENO);
     close(fd_out);
   }
+}
+
+/**
+ * @brief Parses and applies I/O redirection from a raw argument list.
+ *
+ * Scans the argument array for '<', '>', and '>>' operators, extracts
+ * the associated filenames, nullifies them in-place, and applies the
+ * redirection via apply_redirection(). Designed for use inside forked
+ * child processes (e.g. pipeline stages).
+ *
+ * @param args  NULL-terminated argument array (modified in-place).
+ * @return int  0 on success, -1 on syntax error.
+ */
+int handle_redirection(char **args) {
+  char *input_file  = NULL;
+  char *output_file = NULL;
+  int append = 0;
+
+  for (int i = 0; args[i] != NULL; i++) {
+    if (strcmp(args[i], "<") == 0) {
+      if (args[i + 1] == NULL) {
+        fprintf(stderr, "myShell: syntax error near unexpected token '<'\n");
+        return -1;
+      }
+      input_file = args[i + 1];
+      args[i] = NULL;
+      args[i + 1] = NULL;
+      i++; // Skip the filename operand
+    } else if (strcmp(args[i], ">>") == 0) {
+      // Check '>>' before '>' to avoid partial match
+      if (args[i + 1] == NULL) {
+        fprintf(stderr, "myShell: syntax error near unexpected token '>>'\n");
+        return -1;
+      }
+      output_file = args[i + 1];
+      append = 1;
+      args[i] = NULL;
+      args[i + 1] = NULL;
+      i++;
+    } else if (strcmp(args[i], ">") == 0) {
+      if (args[i + 1] == NULL) {
+        fprintf(stderr, "myShell: syntax error near unexpected token '>'\n");
+        return -1;
+      }
+      output_file = args[i + 1];
+      append = 0;
+      args[i] = NULL;
+      args[i + 1] = NULL;
+      i++;
+    }
+  }
+
+  // Delegate actual file operations to the existing apply_redirection helper
+  apply_redirection(input_file, output_file, append);
+  return 0;
 }
 
 /**
@@ -285,6 +341,149 @@ void s_execute_builtin(char *cmd, char **args, size_t n_args) {
   BUILTIN_TABLE[builtin_code(cmd)](args, n_args);
 }
 
+// --- PIPING ---
+
+/**
+ * @brief Executes a command line that may contain a single pipe ('|').
+ *
+ * Scans the argument list for a pipe token. If found, splits the command
+ * into two stages, creates a pipe between them, and forks a child for each
+ * stage. Each child handles its own I/O redirection independently.
+ * If no pipe is present, falls through to built-in dispatch or s_execute().
+ *
+ * @param args       The parsed argument array (may be modified in-place).
+ * @param args_read  Total number of tokens in the array.
+ * @param background If non-zero, the pipeline runs asynchronously.
+ * @return int       0 on success, -1 on failure.
+ */
+int s_execute_pipeline(char **args, int args_read, int background) {
+  // Locate the first pipe operator in the argument list
+  int pipe_idx = -1;
+  for (int i = 0; i < args_read; i++) {
+    if (args[i] && strcmp(args[i], "|") == 0) { pipe_idx = i; break; }
+  }
+
+  // --- Single-command fast path (no pipe detected) ---
+  if (pipe_idx == -1) {
+    Builtin code = builtin_code(args[0]);
+    if (code != INVALID) {
+      BUILTIN_TABLE[code](args + 1, (size_t)(args_read - 1));
+      return 0;
+    }
+
+    // Parse redirection tokens before handing off to s_execute
+    char *input_file  = NULL;
+    char *output_file = NULL;
+    int append = 0;
+
+    for (int i = 1; i < args_read; i++) {
+      if (args[i] == NULL) continue;
+      if (strcmp(args[i], "<") == 0) {
+        if (i + 1 < args_read && args[i + 1]) {
+          input_file = args[i + 1];
+          args[i] = NULL; args[i + 1] = NULL;
+          i++;
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '<'\n");
+          return -1;
+        }
+      } else if (strcmp(args[i], ">>") == 0) {
+        // Check '>>' before '>' to avoid partial match
+        if (i + 1 < args_read && args[i + 1]) {
+          output_file = args[i + 1]; append = 1;
+          args[i] = NULL; args[i + 1] = NULL;
+          i++;
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '>>'\n");
+          return -1;
+        }
+      } else if (strcmp(args[i], ">") == 0) {
+        if (i + 1 < args_read && args[i + 1]) {
+          output_file = args[i + 1]; append = 0;
+          args[i] = NULL; args[i + 1] = NULL;
+          i++;
+        } else {
+          fprintf(stderr, "myShell: syntax error near unexpected token '>'\n");
+          return -1;
+        }
+      }
+    }
+
+    return s_execute(args[0], args, background, input_file, output_file, append);
+  }
+
+  // --- Pipeline path: split at the pipe token ---
+  args[pipe_idx] = NULL;
+  char **cmd1 = args;                   // Left-hand side of the pipe
+  char **cmd2 = &args[pipe_idx + 1];    // Right-hand side of the pipe
+
+  int fd[2];
+  if (pipe(fd) < 0) {
+    perror("myShell: pipe");
+    return -1;
+  }
+
+  // Fork the producer (left side): stdout → pipe write end
+  pid_t p1 = fork();
+  if (p1 < 0) {
+    perror("myShell: fork");
+    close(fd[0]); close(fd[1]);
+    return -1;
+  }
+  if (p1 == 0) {
+    // Child: restore default signal disposition before exec
+    signal(SIGINT, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+
+    // Wire stdout to the pipe's write end
+    dup2(fd[1], STDOUT_FILENO);
+    close(fd[0]); close(fd[1]);
+
+    // Apply any additional I/O redirection on this side
+    if (handle_redirection(cmd1) < 0) _exit(1);
+
+    execvp(cmd1[0], cmd1);
+    fprintf(stderr, "myShell: %s: %s\n", cmd1[0], strerror(errno));
+    _exit(127);
+  }
+
+  // Fork the consumer (right side): stdin ← pipe read end
+  pid_t p2 = fork();
+  if (p2 < 0) {
+    perror("myShell: fork");
+    close(fd[0]); close(fd[1]);
+    waitpid(p1, NULL, 0); // Clean up the first child
+    return -1;
+  }
+  if (p2 == 0) {
+    // Child: restore default signal disposition before exec
+    signal(SIGINT, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+
+    // Wire stdin to the pipe's read end
+    dup2(fd[0], STDIN_FILENO);
+    close(fd[0]); close(fd[1]);
+
+    // Apply any additional I/O redirection on this side
+    if (handle_redirection(cmd2) < 0) _exit(1);
+
+    execvp(cmd2[0], cmd2);
+    fprintf(stderr, "myShell: %s: %s\n", cmd2[0], strerror(errno));
+    _exit(127);
+  }
+
+  // Parent: close both ends of the pipe to avoid deadlock
+  close(fd[0]); close(fd[1]);
+
+  if (background) {
+    fprintf(stdout, "[bg] pid=%d %d\n", (int)p1, (int)p2);
+  } else {
+    // Wait for both stages to finish before returning to the prompt
+    waitpid(p1, NULL, 0);
+    waitpid(p2, NULL, 0);
+  }
+  return 0;
+}
 
 /**
  * @brief Main execution loop of the shell.
@@ -325,77 +524,19 @@ int main(void) {
     }
 
     // --- Evaluation Step ---
-    char *cmd = args[0];
-    char *input_file  = NULL;
-    char *output_file = NULL;
-    int append     = 0;
     int background = 0;
 
-    /**
-     * Parse special operators from the argument list:
-     *   '<'  — input redirection
-     *   '>'  — output redirection (truncate)
-     *   '>>' — output redirection (append)
-     *   '&'  — background execution
-     *
-     * Each operator and its operand are nullified in-place so that
-     * the remaining args[] array is clean for execvp().
-     */
-    int syntax_error = 0;
-    for (int i = 1; i < args_read; i++) {
-      if (strcmp(args[i], "<") == 0) {
-        if (i + 1 < args_read) {
-          input_file = args[i + 1];
-          args[i] = NULL;
-          args[i + 1] = NULL;
-          i++; // Skip the filename operand
-        } else {
-          fprintf(stderr, "myShell: syntax error near unexpected token '<'\n");
-          syntax_error = 1;
-          break;
-        }
-      } else if (strcmp(args[i], ">>") == 0) {
-        // Check '>>' before '>' to avoid partial match
-        if (i + 1 < args_read) {
-          output_file = args[i + 1];
-          append = 1;
-          args[i] = NULL;
-          args[i + 1] = NULL;
-          i++;
-        } else {
-          fprintf(stderr, "myShell: syntax error near unexpected token '>>'\n");
-          syntax_error = 1;
-          break;
-        }
-      } else if (strcmp(args[i], ">") == 0) {
-        if (i + 1 < args_read) {
-          output_file = args[i + 1];
-          append = 0;
-          args[i] = NULL;
-          args[i + 1] = NULL;
-          i++;
-        } else {
-          fprintf(stderr, "myShell: syntax error near unexpected token '>'\n");
-          syntax_error = 1;
-          break;
-        }
-      } else if (strcmp(args[i], "&") == 0) {
-        background = 1;
-        args[i] = NULL;
-      }
+    // Strip the background operator ('&') if it trails the command
+    if (args_read > 0 && args[args_read - 1] &&
+        strcmp(args[args_read - 1], "&") == 0) {
+      background = 1;
+      args[args_read - 1] = NULL;
+      args_read--;
     }
 
-    // Skip execution on syntax errors
-    if (syntax_error) {
-      linenoiseFree(line);
-      continue;
-    }
-
-    // Route execution to either a built-in or an external command
-    if (is_builtin(cmd)) {
-      s_execute_builtin(cmd, (args + 1), (size_t)(args_read - 1));
-    } else {
-      s_execute(cmd, args, background, input_file, output_file, append);
+    // Delegate to the pipeline handler (covers single commands and pipes)
+    if (args_read > 0) {
+      s_execute_pipeline(args, args_read, background);
     }
 
     // Post-execution cleanup and prompt refresh
