@@ -40,7 +40,6 @@ void refresh_cwd(void){
 }
 
 void build_prompt(void) {
-  // Simple prompt as requested
   snprintf(PROMPT, sizeof(PROMPT), "🪰  ");
 }
 
