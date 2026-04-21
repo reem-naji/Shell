@@ -1,6 +1,6 @@
 /**
  * @file myShell.c
- * @brief A professional, lightweight custom shell implementation in C.
+ * @brief A Basic, lightweight custom shell implementation in C.
  * 
  * Features include dynamic prompt, command execution (foreground/background),
  * built-in commands (cd, pwd, exit, history), piping, I/O redirection,
