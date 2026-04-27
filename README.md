@@ -1,4 +1,4 @@
-# MyShell 🪰
+# MyShell 
 
 ![C](https://img.shields.io/badge/language-C-blue.svg)
 ![OS](https://img.shields.io/badge/os-Linux%20%7C%20Unix-orange.svg)
