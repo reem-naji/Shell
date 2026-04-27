@@ -338,11 +338,11 @@ int main(void) {
 
   char *line;
   char *args[MAX_ARGS];
-  while ((line = linenoise(PROMPT)) != NULL) {
+  while ((line = linenoise(PROMPT)) != NULL || errno == EAGAIN) {
     // linenoise() displays the prompt, reads input, returns the line
     // Returns NULL on EOF (Ctrl+D) -> exits the loop
 
-    if (errno == EAGAIN) { errno = 0; linenoiseFree(line); continue; }
+    if (errno == EAGAIN) { errno = 0;  continue; }
     // EAGAIN means the read was interrupted by a signal -> skip and retry
 
     char *line_for_history = strdup(line);
