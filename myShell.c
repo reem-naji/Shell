@@ -317,8 +317,8 @@ int main(void) {
 
   char *line;
   char *args[MAX_ARGS];
-  while ((line = linenoise(PROMPT)) != NULL) {
-    if (errno == EAGAIN) { errno = 0; linenoiseFree(line); continue; }
+  while ((line = linenoise(PROMPT)) != NULL || errno == EAGAIN) {
+    if (errno == EAGAIN) { errno = 0; continue; }
 
     char *line_for_history = strdup(line);
 
